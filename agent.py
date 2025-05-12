@@ -48,7 +48,7 @@ class Order:
         self.completed = False   # 是否已送达
 
         # 理论送达时间，单位：时间步
-        self.theoretical_delivery_time = distance / logistics_speed
+        self.theoretical_delivery_time = distance / 2
         # 初始 remaining_time 就等于理论值
         self.remaining_time = self.theoretical_delivery_time
 
@@ -110,18 +110,23 @@ class Customer(Agent):
         if random.random() < self.demand_probability:
             demand = self.cust_demand_multiplier * random.choice(self.demands_list)
             self.order_counter += 1
-
+            manufacturers = [
+                agent for agent in self.model.schedule.agents
+                if isinstance(agent, Manufacturer)
+            ]
+            if not manufacturers:
+                return 
             # 筛选状态为 'Y' 的 Manufacturer
-            valid_manufacturers = [
+            '''valid_manufacturers = [
                 agent for agent in self.model.schedule.agents
                 if hasattr(agent, "status") and agent.status == 'Y' and agent.__class__.__name__ == "Manufacturer"
             ]
             if not valid_manufacturers:
-                return
+                return'''
 
             if self.product_order_mode == "normal":
                 # 普通模式：随机选择一个 Manufacturer
-                chosen_manufacturer = random.choice(valid_manufacturers)
+                chosen_manufacturer = random.choice(manufacturers)
                 order_id = f"{self.unique_id}_{self.order_counter}_{chosen_manufacturer.unique_id}"
                 distance = manhattan_distance(self.pos, chosen_manufacturer.pos)
                 
@@ -143,7 +148,7 @@ class Customer(Agent):
                 # multi_m 模式：随机选择两个不同的 Manufacturer
                 if len(valid_manufacturers) < 2:
                     # 若可选制造商不足2个，退回到 normal 模式
-                    chosen_manufacturer = random.choice(valid_manufacturers)
+                    chosen_manufacturer = random.choice(manufacturers)
                     order_id = f"{self.unique_id}_{self.order_counter}_{chosen_manufacturer.unique_id}"
                     distance = manhattan_distance(self.pos, chosen_manufacturer.pos)
                     order = Order(
@@ -223,7 +228,7 @@ class Manufacturer(Agent):
         super().__init__(unique_id, model)
         self.pos = pos
         self.production_capacity = production_capacity
-        self.status = 'Y'
+        #self.status = 'Y'
         self.product_inventory = initial_product_inventory
         self.raw_material_inventory = initial_raw_material_inventory
         # 拆分库存上限：成品库存和原材料库存分别有各自上限
@@ -281,7 +286,7 @@ class Manufacturer(Agent):
         gap = self.product_inventory - backlog_demand
         return gap
 
-    def update_status(self, gap):
+    '''def update_status(self, gap):
         self.gap_history.append(gap)
         if len(self.gap_history) > 20:
             self.gap_history.pop(0)
@@ -289,6 +294,7 @@ class Manufacturer(Agent):
             self.status = 'N'
         else:
             self.status = 'Y'
+    '''
             
     def update_incoming_raw_material_orders(self):
         """
@@ -368,19 +374,26 @@ class Manufacturer(Agent):
             return  # 已达到库存上限
         # 实际下单数量不能超过可用容量
         raw_material_needed = min(raw_material_needed, capacity_diff)
+        suppliers = [
+            agent for agent in self.model.schedule.agents
+            if isinstance(agent, Supplier) 
+        ]
+        if not suppliers:
+            return
         
         # 选择可用的 Supplier
-        valid_suppliers = [
+        '''valid_suppliers = [
             agent for agent in self.model.schedule.agents
             if isinstance(agent, Supplier) and agent.status == 'Y'
         ]
         # 如果没有可用供应商，就直接返回
-        if not valid_suppliers:
+        #if not valid_suppliers:
             return
+        '''
         
-        if self.material_order_mode == "normal" or len(valid_suppliers) < 2:
+        if self.material_order_mode == "normal": #or len(valid_suppliers) < 2:
             # "normal" 模式或可选供应商不足2个时，采用单一供应商下单
-            chosen_supplier = random.choice(valid_suppliers)
+            chosen_supplier = random.choice(suppliers)
             order_id = f"{self.unique_id}_RM_{self.model.schedule.steps}"
             dist = manhattan_distance(self.pos, chosen_supplier.pos)
             raw_order = Order(
@@ -398,7 +411,7 @@ class Manufacturer(Agent):
             self.model.pending_deliveries.append(raw_order)
         elif self.material_order_mode == "multi_s":
             # multi_s 模式：随机选取两个不同的供应商，并将订单拆分为两个部分订单
-            suppliers = random.sample(valid_suppliers, 2)
+            suppliers = random.sample(suppliers, 2)
             qty_each = raw_material_needed // 2
             remainder = raw_material_needed - qty_each * 2  # 若 raw_material_needed 不整除，将余数归给第一个订单
             for idx, s in enumerate(suppliers):
@@ -426,7 +439,7 @@ class Manufacturer(Agent):
         self.update_incoming_raw_material_orders()
         self.ship_orders()
         gap = self.calculate_gap()
-        self.update_status(gap)
+        #self.update_status(gap)
         self.production_logic()
         self.current_shipped = 0 
         # 累计当前时刻的仓储成本（单位仓储成本为1）
@@ -451,7 +464,7 @@ class Supplier(Agent):
         super().__init__(unique_id, model)
         self.pos = pos
         self.material_capacity = material_capacity
-        self.status = 'Y'
+        #self.status = 'Y'
         
         self.raw_material_inventory = initial_raw_material_inventory
         self.pending_orders = {}
@@ -484,7 +497,7 @@ class Supplier(Agent):
         backlog_demand = sum(o.quantity for o in self.pending_orders.values() if not o.shipped)
         return self.raw_material_inventory - backlog_demand
 
-    def update_status(self, gap):
+    '''def update_status(self, gap):
         self.gap_history.append(gap)
         if len(self.gap_history) > 10:
             self.gap_history.pop(0)
@@ -492,6 +505,7 @@ class Supplier(Agent):
             self.status = 'N'
         else:
             self.status = 'Y'
+    '''
 
     def production_logic(self):
         gap = self.calculate_gap()
@@ -505,7 +519,7 @@ class Supplier(Agent):
     def step(self):
         self.ship_orders()
         gap = self.calculate_gap()
-        self.update_status(gap)
+        #self.update_status(gap)
         self.production_logic()
         self.current_shipped = 0
 
