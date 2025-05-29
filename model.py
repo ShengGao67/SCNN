@@ -19,8 +19,8 @@ from SCN.agent import Order, Customer, Manufacturer, Supplier, manhattan_distanc
 
 def update_transport_cost_for_order(order, model):
     if order.order_type == "product" and order.completed:
-        # 计算运输成本：实际送达天数 * 订单数量
-        transport_cost = order.actual_delivery_time * order.quantity
+        # 计算运输成本：距离 * 订单数量
+        transport_cost = order.distance *0.2 * order.quantity * (1+0.5* (order.logistics_speed/4-1))
         # 计算违约成本：若实际送达天数大于理论送达天数，则额外惩罚 = 延误天数 * 订单数量 * 1
         penalty_cost = 0
         if order.actual_delivery_time > order.theoretical_delivery_time:
@@ -34,9 +34,9 @@ def update_transport_cost_for_order(order, model):
                 m.completed_products += order.quantity
                 break
 
-GRID_SIZE = 10
+GRID_SIZE = 20
 
-used_positions = set()
+'''used_positions = set()
 
 def random_position_unique(pos_list):
     """
@@ -45,14 +45,16 @@ def random_position_unique(pos_list):
     pos = random.choice(pos_list)
     pos_list.remove(pos)
     return pos
-
+'''
 
 # In[6]:
 
 
 class SupplyChainGridModel(Model):
-    def __init__(self,
-                 positions,             # 网格上所有 (x, y) 坐标列表
+    def __init__(self, 
+                 cust_positions,
+                 man_positions,
+                 sup_positions,
                  demands_list,          # 客户需求量列表
                  inventory_list,        # 初始库存列表
                  num_customers=10,
@@ -63,8 +65,9 @@ class SupplyChainGridModel(Model):
                  m_production_capacity=10,
                  m_inventory_capacity_product=400,
                  m_inventory_capacity_material=800,
+                 m_status='Y',
                  s_material_capacity=40,
-                 m_cap_mode="homogeneous",  # 可选值："homogeneous", "heterogeneous", "regional_heterogeneous"
+                 agent_mode="homogeneous",  # 可选值："homogeneous", "heterogeneous", "regional_heterogeneous"
                  logistics_speed=1.0,
                  # Manufacturer 原材料采购策略参数：
                  rm_procurement_mode="gap_based",  # "gap_based" 或 "reorder_point"
@@ -82,21 +85,14 @@ class SupplyChainGridModel(Model):
         self.delivered_orders = []
         self.steps = 0
         self.logistics_speed = logistics_speed
-        self.m_cap_mode = m_cap_mode
-
-        # 为避免重复使用，复制一份 positions
-        self.available_positions = positions.copy()
-
-        # 如果采用区域异质模式，计算网格宽度（假定 positions 中 x 坐标从 0 开始连续）
-        if m_cap_mode == "regional_heterogeneous":
-            self.grid_width = max(pos[0] for pos in positions) + 1
-        else:
-            self.grid_width = None
+        self.agent_mode = agent_mode
+        self.distances_initialized = False
+        self.grid_width = 21
 
         # =========== 创建 Customer ===========
         self.customers = []
         for i in range(num_customers):
-            pos = random_position_unique(self.available_positions)
+            pos = cust_positions[i]
             customer = Customer(
                 unique_id=f"C{i+1}",
                 model=self,
@@ -112,16 +108,16 @@ class SupplyChainGridModel(Model):
         # =========== 创建 Manufacturer ===========
         self.manufacturers = []
         for i in range(num_manufacturers):
-            pos = random_position_unique(self.available_positions)
+            pos = man_positions[i]
             # 根据 m_cap_mode 设置 Manufacturer 的 production_capacity
-            if m_cap_mode == "homogeneous":
+            if agent_mode == "homogeneous":
                 prod_cap = m_production_capacity
-            elif m_cap_mode == "heterogeneous":
-                prod_cap = random.randint(max(1, m_production_capacity - 5), m_production_capacity + 5)
-            elif m_cap_mode == "regional_heterogeneous":
-                # 若所在位置在网格右侧三列，则产能异质；否则同质
-                if pos[0] >= self.grid_width - 3:
-                    prod_cap = random.randint(max(1, m_production_capacity - 5), m_production_capacity + 5)
+            elif agent_mode == "heterogeneous":
+                prod_cap = random.randint(max(1, m_production_capacity - 30), m_production_capacity + 30)
+            elif agent_mode == "regional_heterogeneous":
+                # 若所在位置在网格右侧五列，则产能异质；否则同质
+                if pos[0] >= self.grid_width - 5:
+                    prod_cap = random.randint(max(1, m_production_capacity - 30), m_production_capacity + 30)
                 else:
                     prod_cap = m_production_capacity
             else:
@@ -134,6 +130,7 @@ class SupplyChainGridModel(Model):
                 unique_id=f"M{i+1}",
                 model=self,
                 pos=pos,
+                status=m_status,
                 production_capacity=prod_cap,
                 initial_product_inventory=init_prod_inv,
                 initial_raw_material_inventory=init_raw_inv,
@@ -151,7 +148,7 @@ class SupplyChainGridModel(Model):
         # =========== 创建 Supplier ===========
         self.suppliers = []
         for i in range(num_suppliers):
-            pos = random_position_unique(self.available_positions)
+            pos = sup_positions[i]
             init_raw_material = random.choice(inventory_list) * 2
             supplier = Supplier(
                 unique_id=f"S{i+1}",
@@ -162,8 +159,36 @@ class SupplyChainGridModel(Model):
             )
             self.suppliers.append(supplier)
             self.schedule.add(supplier)
+    def _compute_all_distances(self):
+        agents = list(self.schedule.agents)
+        customers     = [a for a in agents if isinstance(a, Customer)]
+        manufacturers = [a for a in agents if isinstance(a, Manufacturer)]
+        suppliers     = [a for a in agents if isinstance(a, Supplier)]
+        '''for customer in self.customers:
+            print(f"Customer {customer.unique_id} at {customer.pos}")
+        for m in self.manufacturers:
+            print(f"Manufacturer {m.unique_id} at {m.pos}")
+        for s in self.suppliers:
+            print(f"Supplier {s.unique_id} at {s.pos}")'''
+        # Customer ↔ Manufacturer
+        for c in customers:
+            for m in manufacturers:
+                d = manhattan_distance(c.pos, m.pos)
+                # 同时存到 Customer 和 Manufacturer
+                c.distance_to_manufacturer[m.unique_id] = d
+                m.distance_to_customer[c.unique_id]   = d
+        # Manufacturer ↔ Supplier
+        for m in manufacturers:
+            for s in suppliers:
+                d = manhattan_distance(m.pos, s.pos)
+                m.distance_to_supplier[s.unique_id]    = d
+                s.distance_to_manufacturer[m.unique_id] = d
 
     def step(self):
+        if not self.distances_initialized:
+            self._compute_all_distances()
+            self.distances_initialized = True
+            
         self.schedule.step()
         # 遍历 pending_deliveries 中所有产品订单
         for order in list(self.pending_deliveries):

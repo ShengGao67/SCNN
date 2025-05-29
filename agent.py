@@ -48,9 +48,9 @@ class Order:
         self.completed = False   # 是否已送达
 
         # 理论送达时间，单位：时间步
-        self.theoretical_delivery_time = distance / 2
+        self.theoretical_delivery_time = math.ceil(distance / 4)
         # 初始 remaining_time 就等于理论值
-        self.remaining_time = self.theoretical_delivery_time
+        self.remaining_time = math.ceil(distance / logistics_speed)
 
         # actual_delivery_time 从订单创建时开始计时
         self.actual_delivery_time = None
@@ -104,31 +104,105 @@ class Customer(Agent):
         self.cust_demand_multiplier = cust_demand_multiplier
         self.order_counter = 0
         self.orders = {}  # 存储该 customer 发出的订单
+        self.distance_to_manufacturer = {}
 
     def generate_order(self):
         """以一定概率产生订单，创建 Order 对象并发送给 Manufacturer"""
         if random.random() < self.demand_probability:
-            demand = self.cust_demand_multiplier * random.choice(self.demands_list)
+            # 1. 生成需求量
+            demand = int(self.cust_demand_multiplier * random.choice(self.demands_list))
             self.order_counter += 1
-            manufacturers = [
+
+            # 2. 全部 Manufacturer 和状态为 Y 的 Manufacturer
+            all_ms = [a for a in self.model.schedule.agents if isinstance(a, Manufacturer)]
+            if not all_ms:
+                return
+            ys = [m for m in all_ms if m.status == 'Y']
+
+            # 用已有的 distance_to_manufacturer
+            def pick_nearest(cands, k=1):
+                lst = []
+                for m in cands:
+                    d = self.distance_to_manufacturer[m.unique_id]
+                    lst.append((d, m))
+                random.shuffle(lst)
+                lst.sort(key=lambda x: x[0])
+                return [m for _, m in lst[:k]]
+
+            # --- Normal 模式 ---
+            if self.product_order_mode == "normal":
+                if ys:
+                    chosen = random.choice(ys)
+                else:
+                    chosen = pick_nearest(all_ms, 1)[0]
+
+                order_id = f"{self.unique_id}_{self.order_counter}_{chosen.unique_id}"
+                distance = self.distance_to_manufacturer[chosen.unique_id]
+                order = Order(
+                    order_id=order_id,
+                    creation_time=self.model.schedule.steps,
+                    sender_id=self.unique_id,
+                    receiver_id=chosen.unique_id,
+                    material_id="product",
+                    quantity=demand,
+                    order_type="product",
+                    distance=distance,
+                    logistics_speed=self.model.logistics_speed
+                )
+                self.orders[order_id] = order
+                chosen.receive_order(order)
+                self.model.pending_deliveries.append(order)
+
+            # --- multi_m 模式 ---
+            else:
+                # 先挑状态为Y的
+                if len(ys) >= 2:
+                    targets = random.sample(ys, 2)
+                elif len(ys) == 1:
+                    first = ys[0]
+                    rest = [m for m in all_ms if m is not first]
+                    second = pick_nearest(rest, 1)[0]
+                    targets = [first, second]
+                else:
+                    targets = pick_nearest(all_ms, 2)
+
+                # 将 demand 平均分配
+                qty_each = demand // 2
+                rem = demand - qty_each * 2  # 如果是奇数，第一个多分余数
+
+                for idx, m in enumerate(targets, start=1):
+                    qty = qty_each + (rem if idx == 1 else 0)
+                    order_id = f"{self.unique_id}_{self.order_counter}_{idx+1}_{m.unique_id}"
+                    distance = self.distance_to_manufacturer[m.unique_id]
+                    order = Order(
+                        order_id=order_id,
+                        creation_time=self.model.schedule.steps,
+                        sender_id=self.unique_id,
+                        receiver_id=m.unique_id,
+                        material_id="product",
+                        quantity=qty,
+                        order_type="product",
+                        distance=distance,
+                        logistics_speed=self.model.logistics_speed
+                    )
+                    self.orders[order_id] = order
+                    m.receive_order(order)
+                    self.model.pending_deliveries.append(order)
+                
+            '''manufacturers = [
                 agent for agent in self.model.schedule.agents
                 if isinstance(agent, Manufacturer)
             ]
             if not manufacturers:
                 return 
             # 筛选状态为 'Y' 的 Manufacturer
-            '''valid_manufacturers = [
-                agent for agent in self.model.schedule.agents
-                if hasattr(agent, "status") and agent.status == 'Y' and agent.__class__.__name__ == "Manufacturer"
-            ]
-            if not valid_manufacturers:
-                return'''
 
             if self.product_order_mode == "normal":
                 # 普通模式：随机选择一个 Manufacturer
                 chosen_manufacturer = random.choice(manufacturers)
                 order_id = f"{self.unique_id}_{self.order_counter}_{chosen_manufacturer.unique_id}"
-                distance = manhattan_distance(self.pos, chosen_manufacturer.pos)
+                distance = self.distance_to_manufacturer[chosen_manufacturer.unique_id]
+                #distance = manhattan_distance(self.pos, chosen_manufacturer.pos)
                 
                 order = Order(
                     order_id=order_id,
@@ -150,7 +224,7 @@ class Customer(Agent):
                     # 若可选制造商不足2个，退回到 normal 模式
                     chosen_manufacturer = random.choice(manufacturers)
                     order_id = f"{self.unique_id}_{self.order_counter}_{chosen_manufacturer.unique_id}"
-                    distance = manhattan_distance(self.pos, chosen_manufacturer.pos)
+                    distance = self.distance_to_manufacturer[chosen_manufacturer.unique_id]
                     order = Order(
                         order_id=order_id,
                         creation_time=self.model.schedule.steps,
@@ -172,7 +246,7 @@ class Customer(Agent):
                     remainder = demand - qty_each * 2  # 若 demand 为奇数，余数归于第一个订单
                     for idx, m in enumerate(manufacturers):
                         order_id = f"{self.unique_id}_{self.order_counter}_{idx+1}_{m.unique_id}"
-                        distance = manhattan_distance(self.pos, m.pos)
+                        distance = distance = self.distance_to_manufacturer[m.unique_id]
                         # 第一个订单数量加上余数
                         qty = qty_each + (remainder if idx == 0 else 0)
                         order = Order(
@@ -189,6 +263,7 @@ class Customer(Agent):
                         self.orders[order_id] = order
                         m.receive_order(order)
                         self.model.pending_deliveries.append(order)
+                        '''
     def step(self):
         self.generate_order()
         
@@ -211,7 +286,7 @@ class Manufacturer(Agent):
       5. 加入库存上限 (inventory_capacity)：每个时间步成品库存不能超过该上限，
          生产时也只能生产到库存达到上限为止。
     """
-    def __init__(self, unique_id, model, pos,
+    def __init__(self, unique_id, model, pos, status,
                  production_capacity=100,
                  initial_product_inventory=50,
                  initial_raw_material_inventory=50,
@@ -228,7 +303,7 @@ class Manufacturer(Agent):
         super().__init__(unique_id, model)
         self.pos = pos
         self.production_capacity = production_capacity
-        #self.status = 'Y'
+        self.status = 'Y'
         self.product_inventory = initial_product_inventory
         self.raw_material_inventory = initial_raw_material_inventory
         # 拆分库存上限：成品库存和原材料库存分别有各自上限
@@ -237,7 +312,6 @@ class Manufacturer(Agent):
 
 
         self.pending_orders = {}
-        self.gap_history = []
         self.current_produced = 0
         self.current_shipped = 0
 
@@ -257,6 +331,8 @@ class Manufacturer(Agent):
 
         # 新增供应原材料订单下单模式参数
         self.material_order_mode = material_order_mode
+        self.distance_to_customer = {}
+        self.distance_to_supplier = {}
 
     def receive_order(self, order):
         if order.order_type == "product":
@@ -285,16 +361,6 @@ class Manufacturer(Agent):
         backlog_demand = sum(o.quantity for o in self.pending_orders.values() if not o.shipped)
         gap = self.product_inventory - backlog_demand
         return gap
-
-    '''def update_status(self, gap):
-        self.gap_history.append(gap)
-        if len(self.gap_history) > 20:
-            self.gap_history.pop(0)
-        if len(self.gap_history) == 20 and all(g < 0 for g in self.gap_history):
-            self.status = 'N'
-        else:
-            self.status = 'Y'
-    '''
             
     def update_incoming_raw_material_orders(self):
         """
@@ -344,6 +410,7 @@ class Manufacturer(Agent):
 
         # 生产逻辑
         if gap < 0:
+            self.status = 'N'
             # 理论上需要生产的产品数量（也受生产能力限制）
             production_needed = min(self.rm_produce_multiplier * abs(gap), self.production_capacity)
             # 考虑库存上限
@@ -360,6 +427,7 @@ class Manufacturer(Agent):
                 self.raw_material_inventory -= partial_production * 2
                 self.current_produced = partial_production
         else:
+            self.status = 'Y'
             self.current_produced = 0
     def order_raw_material(self, raw_material_needed):
         """
@@ -395,7 +463,7 @@ class Manufacturer(Agent):
             # "normal" 模式或可选供应商不足2个时，采用单一供应商下单
             chosen_supplier = random.choice(suppliers)
             order_id = f"{self.unique_id}_RM_{self.model.schedule.steps}"
-            dist = manhattan_distance(self.pos, chosen_supplier.pos)
+            dist = self.distance_to_supplier[chosen_supplier.unique_id]
             raw_order = Order(
                 order_id=order_id,
                 creation_time=self.model.schedule.steps,
@@ -416,7 +484,7 @@ class Manufacturer(Agent):
             remainder = raw_material_needed - qty_each * 2  # 若 raw_material_needed 不整除，将余数归给第一个订单
             for idx, s in enumerate(suppliers):
                 order_id = f"{self.unique_id}_RM_{self.model.schedule.steps}_{idx+1}_{s.unique_id}"
-                dist = manhattan_distance(self.pos, s.pos)
+                dist = self.distance_to_supplier[s.unique_id]
                 # 第一个订单的数量加上余数
                 qty = qty_each + (remainder if idx == 0 else 0)
                 raw_order = Order(
@@ -472,6 +540,7 @@ class Supplier(Agent):
         
         self.current_produced = 0
         self.current_shipped = 0
+        self.distance_to_manufacturer = {}
 
     def receive_order(self, order):
         if order.order_type == "raw_material":
