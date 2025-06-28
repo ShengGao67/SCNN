@@ -10,17 +10,28 @@ import math
 import mesa
 from mesa import Agent, Model
 from mesa.time import BaseScheduler
+from math import radians, sin, cos, atan2, sqrt
 import pandas as pd
-from SCN.agent import Order, Customer, Manufacturer, Supplier, manhattan_distance
-
-
+from SCN.agent import Order, Customer, Manufacturer, Supplier
+from collections import deque
 # In[5]:
+EARTH_RADIUS_KM = 6371.0088          # 平均地球半径 (km)
 
+def haversine_km(lat1: float, lon1: float,
+                 lat2: float, lon2: float) -> float:
+    """
+    给定两点 (纬度, 经度)，返回大圆距离 (km)
+    """
+    φ1, λ1, φ2, λ2 = map(radians, (lat1, lon1, lat2, lon2))
+    dφ, dλ = φ2 - φ1, λ2 - λ1
+    a = sin(dφ / 2) ** 2 + cos(φ1) * cos(φ2) * sin(dλ / 2) ** 2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    return EARTH_RADIUS_KM * c
 
 def update_transport_cost_for_order(order, model):
     if order.order_type == "product" and order.completed:
         # 计算运输成本：距离 * 订单数量
-        transport_cost = order.distance *0.2 * order.quantity * (1+0.5* (order.logistics_speed/4-1))
+        transport_cost = order.distance *0.001 * order.quantity * (1+0.5* max((order.logistics_speed/1000-1),0))
         # 计算违约成本：若实际送达天数大于理论送达天数，则额外惩罚 = 延误天数 * 订单数量 * 1
         penalty_cost = 0
         if order.actual_delivery_time > order.theoretical_delivery_time:
@@ -29,14 +40,26 @@ def update_transport_cost_for_order(order, model):
         # 查找对应的 Manufacturer（订单的 receiver_id）
         for m in model.manufacturers:
             if m.unique_id == order.receiver_id:
+                # —— 写入窗口 deque ——
+                m.hist_trans.append(transport_cost)
+                m.hist_penalty.append(penalty_cost)
+                m.hist_finish.append(order.quantity)
+
+                # —— 累积量照旧 ——
                 m.cumulative_transport_cost += transport_cost
-                m.cumulative_penalty_cost += penalty_cost
-                m.completed_products += order.quantity
+                m.cumulative_penalty_cost   += penalty_cost
+                m.completed_products        += order.quantity
                 break
 
-GRID_SIZE = 20
+            #if m.unique_id == order.receiver_id:
+                #m.cumulative_transport_cost += transport_cost
+                #m.cumulative_penalty_cost += penalty_cost
+                #m.completed_products += order.quantity
+                #break
 
-'''used_positions = set()
+'''GRID_SIZE = 20
+
+used_positions = set()
 
 def random_position_unique(pos_list):
     """
@@ -66,6 +89,7 @@ class SupplyChainGridModel(Model):
                  m_inventory_capacity_product=400,
                  m_inventory_capacity_material=800,
                  m_status='Y',
+                 s_status='Y',
                  s_material_capacity=40,
                  agent_mode="homogeneous",  # 可选值："homogeneous", "heterogeneous", "regional_heterogeneous"
                  logistics_speed=1.0,
@@ -87,7 +111,6 @@ class SupplyChainGridModel(Model):
         self.logistics_speed = logistics_speed
         self.agent_mode = agent_mode
         self.distances_initialized = False
-        self.grid_width = 21
 
         # =========== 创建 Customer ===========
         self.customers = []
@@ -116,7 +139,7 @@ class SupplyChainGridModel(Model):
                 prod_cap = random.randint(max(1, m_production_capacity - 30), m_production_capacity + 30)
             elif agent_mode == "regional_heterogeneous":
                 # 若所在位置在网格右侧五列，则产能异质；否则同质
-                if pos[0] >= self.grid_width - 5:
+                if pos[0] >= 35:
                     prod_cap = random.randint(max(1, m_production_capacity - 30), m_production_capacity + 30)
                 else:
                     prod_cap = m_production_capacity
@@ -152,6 +175,7 @@ class SupplyChainGridModel(Model):
             init_raw_material = random.choice(inventory_list) * 2
             supplier = Supplier(
                 unique_id=f"S{i+1}",
+                status=s_status,
                 model=self,
                 pos=pos,
                 material_capacity=s_material_capacity,
@@ -160,16 +184,35 @@ class SupplyChainGridModel(Model):
             self.suppliers.append(supplier)
             self.schedule.add(supplier)
     def _compute_all_distances(self):
+        """
+        • Customer ↔ Manufacturer
+        • Manufacturer ↔ Supplier
+        所有距离单位都是 km (浮点数)，保留到 0.1 km 可在调用方 round()。
+        """
         agents = list(self.schedule.agents)
         customers     = [a for a in agents if isinstance(a, Customer)]
         manufacturers = [a for a in agents if isinstance(a, Manufacturer)]
         suppliers     = [a for a in agents if isinstance(a, Supplier)]
-        '''for customer in self.customers:
-            print(f"Customer {customer.unique_id} at {customer.pos}")
+        # Customer → Manufacturer
+        for c in customers:
+            for m in manufacturers:
+                d = haversine_km(*c.pos, *m.pos)
+                c.distance_to_manufacturer[m.unique_id] = d
+                m.distance_to_customer[c.unique_id]     = d
+
+        # Manufacturer → Supplier
         for m in self.manufacturers:
-            print(f"Manufacturer {m.unique_id} at {m.pos}")
-        for s in self.suppliers:
-            print(f"Supplier {s.unique_id} at {s.pos}")'''
+            for s in self.suppliers:
+                d = haversine_km(*m.pos, *s.pos)
+                m.distance_to_supplier[s.unique_id]     = d
+                s.distance_to_manufacturer[m.unique_id] = d
+    '''
+    def _compute_all_distances(self):
+        agents = list(self.schedule.agents)
+        customers     = [a for a in agents if isinstance(a, Customer)]
+        manufacturers = [a for a in agents if isinstance(a, Manufacturer)]
+        suppliers     = [a for a in agents if isinstance(a, Supplier)]
+   
         # Customer ↔ Manufacturer
         for c in customers:
             for m in manufacturers:
@@ -183,7 +226,7 @@ class SupplyChainGridModel(Model):
                 d = manhattan_distance(m.pos, s.pos)
                 m.distance_to_supplier[s.unique_id]    = d
                 s.distance_to_manufacturer[m.unique_id] = d
-
+'''
     def step(self):
         if not self.distances_initialized:
             self._compute_all_distances()
@@ -208,7 +251,26 @@ class SupplyChainGridModel(Model):
 
 # In[7]:
 
+def calculate_unit_cost_window(model, win=50):
+    """近 win 步平均单位成本"""
+    tot_cost = 0
+    tot_prod = 0
+    for m in model.manufacturers:
+        tot_cost += (sum(m.hist_product) + sum(m.hist_material)
+                     + sum(m.hist_trans) + sum(m.hist_penalty))
+        tot_prod += sum(m.hist_finish)
+    return tot_cost / tot_prod if tot_prod else None
 
+
+def calculate_ratio_window(model, win=50):
+    """近 win 步时效比"""
+    act, theo = 0, 0
+    for o in model.delivered_orders:
+        if o.order_type == "product" and o.completed_step is not None and o.completed_step > model.schedule.steps - win:
+            act  += o.actual_delivery_time
+            theo += o.theoretical_delivery_time
+    return act / theo if theo else 0
+    
 def calculate_unit_cost(model):
     """
     计算并返回当前模型下所有Manufacturer的平均单位成本：
